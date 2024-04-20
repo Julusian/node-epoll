@@ -1,5 +1,5 @@
 {
-  "name": "epoll",
+  "name": "@julusian/epoll",
   "version": "5.0.0-0",
   "description": "A low-level Node.js binding for the Linux epoll API",
   "main": "epoll.js",
@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/fivdi/epoll.git"
+    "url": "https://github.com/julusian/epoll.git"
   },
   "engines": {
     "node": ">=18.0"

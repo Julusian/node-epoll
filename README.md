@@ -1,6 +1,6 @@
-[![Build Status](https://app.travis-ci.com/fivdi/epoll.svg?branch=master)](https://app.travis-ci.com/github/fivdi/epoll)
-[![npm Version](http://img.shields.io/npm/v/epoll.svg)](https://www.npmjs.com/package/epoll)
-[![Downloads Per Month](http://img.shields.io/npm/dm/epoll.svg)](https://www.npmjs.com/package/epoll)
+[![Build Status](https://app.travis-ci.com/julusian/epoll.svg?branch=master)](https://app.travis-ci.com/github/julusian/epoll)
+[![npm Version](http://img.shields.io/npm/v/@julusian/epoll.svg)](https://www.npmjs.com/package/@julusian/epoll)
+[![Downloads Per Month](http://img.shields.io/npm/dm/@julusian/epoll.svg)](https://www.npmjs.com/package/@julusian/epoll)
 
 # epoll
 

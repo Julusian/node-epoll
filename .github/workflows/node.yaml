@@ -38,13 +38,13 @@ jobs:
           - os: ubuntu-latest
             arch: x64
             is-native: true
-            container: centos:8
+            container: rockylinux:8
           # linux-arm
           - os: ubuntu-latest
             arch: arm64
             # is-native: false
             docker-arch: linux/arm64
-            docker-image: centos:8
+            docker-image: rockylinux:8
           - os: ubuntu-latest
             arch: arm
             # is-native: false
@@ -58,11 +58,11 @@ jobs:
             libc: musl
 
     steps:
-      - name: Dependencies (Centos)
-        if: contains(matrix.container, 'centos')
+      - name: Dependencies (Rockylinux)
+        if: contains(matrix.container, 'rockylinux')
         run: |
           curl -sL https://rpm.nodesource.com/setup_18.x | bash -
-          dnf install centos-release-scl -y
+          dnf install rockylinux-release-scl -y
           dnf install devtoolset-11-gcc-c++ make git python3 nodejs -y
           corepack enable
           echo "/opt/rh/devtoolset-11/root/usr/bin" >> $GITHUB_PATH
@@ -72,7 +72,7 @@ jobs:
 
       - uses: actions/checkout@v4
       - name: Checkout submodules
-        if: "!contains(matrix.container, 'centos')"
+        if: "!contains(matrix.container, 'rockylinux')"
         shell: bash
         run: |
           auth_header="$(git config --local --get http.https://github.com/.extraheader)"
@@ -119,7 +119,7 @@ jobs:
             elif command -v yum &> /dev/null
             then
               curl -sL https://rpm.nodesource.com/setup_18.x | bash -
-              yum install -y centos-release-scl
+              yum install -y rockylinux-release-scl
               yum install -y devtoolset-10-gcc-c++ make git python3 nodejs
               export PATH=/opt/rh/devtoolset-10/root/usr/bin:$PATH
             fi

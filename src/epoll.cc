@@ -34,7 +34,11 @@ namespace epoll
   {
     // The destructor is not guaranteed to be called, but we can perform the same cleanup which gets triggered manually elsewhere
 
-    watcher_ = nullptr;
+    if (watcher_)
+    {
+      watcher_->Forget(this);
+      watcher_ = nullptr;
+    }
   };
 
   Napi::FunctionReference
@@ -183,8 +187,9 @@ namespace epoll
     int err = watcher_->Remove(fd);
 
     fds_.remove(fd);
-    if (fds_.empty())
+    if (fds_.empty() && watcher_)
     {
+      watcher_->Forget(this);
       watcher_ = nullptr;
     }
 
@@ -218,7 +223,11 @@ namespace epoll
         error = err; // TODO - This will only return one of many errors
     }
 
-    watcher_ = nullptr;
+    if (watcher_)
+    {
+      watcher_->Forget(this);
+      watcher_ = nullptr;
+    }
 
     if (error != 0)
     {

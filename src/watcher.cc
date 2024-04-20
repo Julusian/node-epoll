@@ -9,8 +9,6 @@
 #include "watcher.h"
 #include "epoll.h"
 
-#include <iostream>
-
 namespace epoll
 {
     // Transform native data into JS data, passing it to the provided
@@ -23,7 +21,16 @@ namespace epoll
         // not aborted
         if (env != nullptr && context != nullptr && data != nullptr)
         {
-            context->HandleEvent(env, data);
+            // This method is executed in the event loop thread.
+            // By the time flow of control arrives here the original Epoll instance that
+            // registered interest in the event may no longer have this interest. If
+            // this is the case, the event will be silently ignored.
+
+            std::map<int, Epoll *>::iterator it = context->fd2epoll.find(data->event.data.fd);
+            if (it != context->fd2epoll.end())
+            {
+                it->second->DispatchEvent(env, data->error, &data->event);
+            }
         }
 
         if (data != nullptr)
@@ -39,64 +46,38 @@ namespace epoll
 
     EpollWatcher::EpollWatcher(const Napi::Env &env)
     {
-        epfd = epoll_create1(0);
+
+        auto epfd = epoll_create1(0);
         if (epfd == -1)
         {
-            // TODO - error
-            // Napi::Error::New(info.Env(), strerror(errno)).ThrowAsJavaScriptException();
+            Napi::Error::New(env, strerror(errno)).ThrowAsJavaScriptException();
             return;
         }
 
-        // Create a new context set to the receiver (ie, `this`) of the function call
-        // Context *context = new Reference<Napi::Value>(Persistent(info.This()));
+        // Create a context that can be 'leaked' to the native thread, and cleaned up when the tsfn is destroyed
+        auto context = new WatcherContext;
+        this->context = context;
 
-        // TODO - this should move so that it is shared across all instances of this class!
-
-        // Create a ThreadSafeFunction
-        this->tsfn = TSFN::New(
-            env,
-            // callback,               // JavaScript function called asynchronously
-            "Epoll:DispatchEvent", // Name
-            1,                     // Unlimited queue
-            1,                     // Only one thread will use this initially
-            this,                  // context,
-            [&](Napi::Env, FinalizerDataType *,
-                Context *ctx) { // Finalizer used to clean threads up
-                if (nativeThread.joinable())
-                {
-                    nativeThread.join(); // TODO?
-                }
-                // delete ctx;
-            });
+        context->epfd = epfd;
 
         // Create a native thread
-        this->nativeThread = std::thread([&]
-                                         {
+        context->nativeThread = std::thread([context]
+                                            {
 
                                       int count;
 
                                       struct DataType *data = new DataType;
 
-                                      while (!abort_) // TODO - when does this terminate?
+                                      while (!context->abort_)
                                       {
-                                        //   do
-                                        //   {
-                                              count = epoll_wait(epfd, &data->event, 1, 50);
-                                        //   } while (!abort_ && (count == 0 || (count == -1 && errno == EINTR)));
-                                              if (abort_)
-                                                  break;
-                                             
-                                              if (count == 0 || (count == -1 && errno == EINTR))
-                                                  continue;
+                                          count = epoll_wait(context->epfd, &data->event, 1, 50);
+                                          if (context->abort_)
+                                              break;
 
-                                             
+                                          if (count == 0 || (count == -1 && errno == EINTR))
+                                              continue;
 
                                           data->error = count == -1 ? errno : 0;
-
-                                            std::cout << "do thing" << std::endl;
-                                            
-                                            // TODO - this can deadlock if process.exit is called inside of this BlockingCall.
-                                            // We need to be able to emit the thing in such a way that 
 
                                           // Block until the event loop has handled the call, to ensure there isn't a long queue for processing
                                           // Old code said:
@@ -108,9 +89,8 @@ namespace epoll
                                           //   cleared yet. Waiting prevents multiple triggers for the same event.
                                           // - It forces a context switch from the watcher thread to the event loop
                                           //   thread.
-                                          napi_status status = tsfn.BlockingCall(data);
+                                          napi_status status = context->tsfn.BlockingCall(data);
 
-                                          std::cout << "done thing" << std::endl;
                                           data = new DataType;
                                           if (status != napi_ok)
                                           {
@@ -118,11 +98,27 @@ namespace epoll
                                           }
                                       }
 
-                                      std::cout << "term" << std::endl;
                                       delete data;
 
                                       // Release the thread-safe function
-                                      tsfn.Release(); });
+                                      context->tsfn.Release(); });
+
+        // Create a ThreadSafeFunction
+        context->tsfn = TSFN::New(
+            env,
+            // callback,               // JavaScript function called asynchronously
+            "Epoll:DispatchEvent", // Name
+            1,                     // Queue size
+            1,                     // Only one thread will use this initially
+            context,               // context,
+            [&](Napi::Env, FinalizerDataType *,
+                Context *ctx) { // Finalizer used to clean threads up
+                if (ctx->nativeThread.joinable())
+                {
+                    ctx->nativeThread.join();
+                }
+                delete ctx;
+            });
     };
 
     EpollWatcher::~EpollWatcher()
@@ -133,23 +129,23 @@ namespace epoll
 
     void EpollWatcher::Cleanup()
     {
-        abort_ = true;
-
-        if (epfd != -1)
+        if (context->epfd != -1)
         {
-            close(epfd);
-            epfd = -1;
+            close(context->epfd);
+            context->epfd = -1;
         }
 
-        std::cout << "stopping" << std::endl;
+        context->abort_ = true;
 
-        if (nativeThread.joinable())
-            nativeThread.join();
+        context = nullptr;
     }
 
     int EpollWatcher::Add(int fd, uint32_t events, Epoll *epoll)
     {
-        if (fd2epoll.count(fd) > 0)
+        if (context == nullptr)
+            return 111;
+
+        if (context->fd2epoll.count(fd) > 0)
         {
             // Already being watched somewhere
             return 111;
@@ -159,21 +155,24 @@ namespace epoll
         event.events = events;
         event.data.fd = fd;
 
-        if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event) == -1)
+        if (epoll_ctl(context->epfd, EPOLL_CTL_ADD, fd, &event) == -1)
             return errno;
 
-        fd2epoll.insert(std::pair<int, Epoll *>(fd, epoll));
+        context->fd2epoll.insert(std::pair<int, Epoll *>(fd, epoll));
 
         return 0;
     }
 
     int EpollWatcher::Modify(int fd, uint32_t events)
     {
+        if (context == nullptr)
+            return 111;
+
         struct epoll_event event;
         event.events = events;
         event.data.fd = fd;
 
-        if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event) == -1)
+        if (epoll_ctl(context->epfd, EPOLL_CTL_MOD, fd, &event) == -1)
             return errno;
 
         return 0;
@@ -181,26 +180,35 @@ namespace epoll
 
     int EpollWatcher::Remove(int fd)
     {
-        if (epoll_ctl(epfd, EPOLL_CTL_DEL, fd, 0) == -1)
+        if (context == nullptr)
+            return 111;
+
+        if (epoll_ctl(context->epfd, EPOLL_CTL_DEL, fd, 0) == -1)
             return errno;
 
-        fd2epoll.erase(fd);
+        context->fd2epoll.erase(fd);
 
         return 0;
     }
 
-    void EpollWatcher::HandleEvent(const Napi::Env &env, DataType *event)
+    void EpollWatcher::Forget(Epoll *epoll)
     {
-        // This method is executed in the event loop thread.
-        // By the time flow of control arrives here the original Epoll instance that
-        // registered interest in the event may no longer have this interest. If
-        // this is the case, the event will be silently ignored.
+        if (context == nullptr)
+            return;
 
-        std::map<int, Epoll *>::iterator it = fd2epoll.find(event->event.data.fd);
-        if (it != fd2epoll.end())
+        for (std::map<int, Epoll *>::iterator it = context->fd2epoll.begin(); it != context->fd2epoll.end();)
         {
-            it->second->DispatchEvent(env, event->error, &event->event);
+            if (it->second == epoll)
+            {
+                epoll_ctl(context->epfd, EPOLL_CTL_DEL, it->first, 0);
+                it = context->fd2epoll.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
         }
     }
+
 }
 #endif

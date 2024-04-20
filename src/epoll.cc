@@ -114,7 +114,7 @@ namespace epoll
     if (err != 0)
     {
       Napi::Error::New(env, strerror(err)).ThrowAsJavaScriptException();
-      return env.Null(); // TODO - use err also
+      return env.Null();
     }
 
     fds_.push_back(fd);
@@ -156,7 +156,7 @@ namespace epoll
     if (err != 0)
     {
       Napi::Error::New(env, strerror(err)).ThrowAsJavaScriptException();
-      return env.Null(); // TODO - use err also
+      return env.Null();
     }
 
     return info.This();
@@ -223,7 +223,7 @@ namespace epoll
     if (error != 0)
     {
       Napi::Error::New(env, strerror(error)).ThrowAsJavaScriptException();
-      return env.Null(); // TODO - use err also
+      return env.Null();
     }
 
     return env.Null();

@@ -38,13 +38,13 @@ jobs:
           - os: ubuntu-latest
             arch: x64
             is-native: true
-            container: rockylinux:8
+            container: rockylinux:9
           # linux-arm
           - os: ubuntu-latest
             arch: arm64
             # is-native: false
             docker-arch: linux/arm64
-            docker-image: rockylinux:8
+            docker-image: rockylinux:9
           - os: ubuntu-latest
             arch: arm
             # is-native: false
@@ -62,9 +62,9 @@ jobs:
         if: contains(matrix.container, 'rockylinux')
         run: |
           curl -sL https://rpm.nodesource.com/setup_18.x | bash -
-          dnf install gcc-toolset-11-toolchain make git python3 nodejs -y
+          dnf install gcc-toolset-12 make git python3 nodejs -y
           corepack enable
-          echo "/opt/rh/gcc-toolset-11/root/usr/bin" >> $GITHUB_PATH
+          echo "/opt/rh/gcc-toolset-12/root/usr/bin" >> $GITHUB_PATH
       - name: Dependencies (Linux musl)
         if: contains(matrix.container, 'alpine')
         run: apk add build-base git python3 font-noto bash --update-cache
@@ -111,8 +111,8 @@ jobs:
             elif command -v dnf &> /dev/null
             then
               curl -sL https://rpm.nodesource.com/setup_18.x | bash -
-              dnf install -y gcc-toolset-11-toolchain make git python3 nodejs
-              export PATH=/opt/rh/gcc-toolset-11/root/usr/bin:$PATH
+              dnf install -y gcc-toolset-12 make git python3 nodejs
+              export PATH=/opt/rh/gcc-toolset-12/root/usr/bin:$PATH
             fi
 
             cd /work

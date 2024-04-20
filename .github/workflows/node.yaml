@@ -23,38 +23,38 @@ jobs:
           # windows
           - os: windows-2019
             arch: x64
-            is-native: true
+            # is-native: false
           - os: windows-2019
             arch: ia32
-            is-native: false
+            # is-native: false
           # macos
           - os: macos-11
             arch: arm64
-            is-native: false
+            # is-native: false
           - os: macos-11
             arch: x64
-            is-native: true
+            # is-native: false
           # linux
           - os: ubuntu-latest
             arch: x64
             is-native: true
-            container: centos:7
+            container: centos:8
           # linux-arm
           - os: ubuntu-latest
             arch: arm64
-            is-native: false
+            # is-native: false
             docker-arch: linux/arm64
-            docker-image: centos:7
+            docker-image: centos:8
           - os: ubuntu-latest
             arch: arm
-            is-native: false
+            # is-native: false
             docker-arch: linux/arm/v7
             docker-image: node:18-buster
           # linux-musl
           - os: ubuntu-latest
             arch: x64
             is-native: true
-            container: node:18-alpine3.12
+            container: node:18-alpine3.18
             libc: musl
 
     steps:

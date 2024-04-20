@@ -39,5 +39,13 @@
   ],
   "author": "fivdi",
   "license": "MIT",
-  "gypfile": true
+  "gypfile": true,
+  "files": [
+    "binding.gyp",
+    "binding-options.js",
+    "epoll.js",
+    "epoll.d.ts",
+    "src",
+    "prebuilds"
+  ]
 }

@@ -62,15 +62,15 @@ jobs:
         if: contains(matrix.container, 'centos')
         run: |
           curl -sL https://rpm.nodesource.com/setup_18.x | bash -
-          yum install -y centos-release-scl
-          yum install -y devtoolset-11-gcc-c++ make git python3 nodejs
+          dnf install centos-release-scl -y
+          dnf install devtoolset-11-gcc-c++ make git python3 nodejs -y
           corepack enable
           echo "/opt/rh/devtoolset-11/root/usr/bin" >> $GITHUB_PATH
       - name: Dependencies (Linux musl)
         if: contains(matrix.container, 'alpine')
         run: apk add build-base git python3 font-noto bash --update-cache
 
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Checkout submodules
         if: "!contains(matrix.container, 'centos')"
         shell: bash
@@ -81,7 +81,7 @@ jobs:
 
       - name: Use Node.js 18.x
         if: ${{ !matrix.docker-arch && !matrix.container }}
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: 18.x
 
@@ -102,7 +102,7 @@ jobs:
           npm_config_build_from_source: true
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v2
+        uses: docker/setup-qemu-action@v3
         if: matrix.docker-arch
       - name: rebuild (in docker)
         uses: addnab/docker-run-action@v3
@@ -136,7 +136,7 @@ jobs:
             yarn pkg-prebuilds-copy --baseDir build/Release --source $BINDING_NAME.node --name=$BINDING_NAME --strip --napi_version=$NAPI_VERSION --arch=${{ matrix.arch }} --libc=${{ matrix.libc }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ runner.os }}-${{ matrix.arch }}-${{ matrix.libc }}-prebuilds
           path: prebuilds
@@ -147,7 +147,7 @@ jobs:
     needs: build-and-test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           path: tmp
 
@@ -157,7 +157,7 @@ jobs:
           cp -R tmp/*/* prebuilds/
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: all-prebuilds
           path: prebuilds

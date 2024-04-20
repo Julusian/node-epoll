@@ -1,377 +1,281 @@
 #ifdef __linux__
 
 #include <errno.h>
-#include <pthread.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <unistd.h>
-#include <map>
 #include <list>
-#include <uv.h>
-#include <v8.h>
-#include <node.h>
-#include <node_object_wrap.h>
-#include <node_version.h>
-#include <nan.h>
 #include "epoll.h"
 
-// TODO - strerror isn't threadsafe, use strerror_r instead
-// TODO - use uv_strerror rather than strerror_r for libuv errors?
+#include <iostream>
 
-static int epfd_g;
+namespace epoll
+{
+  // TODO - strerror isn't threadsafe, use strerror_r instead
+  // TODO - use uv_strerror rather than strerror_r for libuv errors?
 
-static uv_sem_t sem_g;
-static uv_async_t async_g;
+  Epoll::Epoll(const Napi::CallbackInfo &info)
+      : Napi::ObjectWrap<Epoll>(info),
+        async_context_(Napi::AsyncContext(info.Env(), "Epoll")),
+        closed_(false)
+  {
+    Napi::Env env = info.Env();
 
-static struct epoll_event event_g;
-static int errno_g;
+    if (info.Length() < 1 || !info[0].IsFunction())
+    {
+      Napi::Error::New(env, "First argument to construtor must be a callback").ThrowAsJavaScriptException();
+      return;
+    }
 
+    callback_ = Napi::Persistent(info[0].As<Napi::Function>());
+  };
 
-/*
- * Watcher thread
- */
-static void *watcher(void *arg) {
-  int count;
+  Epoll::~Epoll()
+  {
+    // The destructor is not guaranteed to be called, but we can perform the same cleanup which gets triggered manually elsewhere
 
-  while (true) {
-    // Wait till the event loop says it's ok to poll. The semaphore serves more
-    // than one purpose.
-    // - It synchronizing access to '1 element queue' in variables
-    //   event_g and errno_g.
-    // - When level-triggered epoll is used, the default when EPOLLET isn't
-    //   specified, the event triggered by the last call to epoll_wait may be
-    //   trigged again and again if the condition that triggered it hasn't been
-    //   cleared yet. Waiting prevents multiple triggers for the same event.
-    // - It forces a context switch from the watcher thread to the event loop
-    //   thread.
-    uv_sem_wait(&sem_g);
+    watcher_ = nullptr;
+  };
 
-    do {
-      count = epoll_wait(epfd_g, &event_g, 1, -1);
-    } while (count == -1 && errno == EINTR);
+  Napi::FunctionReference
+  Epoll::Init(const Napi::Env &env, Napi::Object exports)
+  {
+    // This method is used to hook the accessor and method callbacks
+    Napi::Function func = DefineClass(env, "Epoll", {
 
-    errno_g = count == -1 ? errno : 0;
+                                                        InstanceMethod<&Epoll::Add>("add", static_cast<napi_property_attributes>(napi_writable | napi_configurable)),
+                                                        //
+                                                        InstanceMethod<&Epoll::Close>("close", static_cast<napi_property_attributes>(napi_writable | napi_configurable)),
+                                                        //
+                                                        InstanceMethod<&Epoll::Remove>("remove", static_cast<napi_property_attributes>(napi_writable | napi_configurable)),
+                                                        //
+                                                        InstanceMethod<&Epoll::Modify>("modify", static_cast<napi_property_attributes>(napi_writable | napi_configurable)),
+                                                        //
+                                                        InstanceAccessor<&Epoll::GetClosed>("closed", static_cast<napi_property_attributes>(napi_writable | napi_configurable)),
+                                                        // StaticMethod<&Example::CreateNewItem>("CreateNewItem", static_cast<napi_property_attributes>(napi_writable | napi_configurable)),
 
-    // Errors returned from uv_async_send are silently ignored.
-    uv_async_send(&async_g);
+                                                        StaticValue("EPOLLIN", Napi::Number::New(env, EPOLLIN), napi_default),
+                                                        StaticValue("EPOLLOUT", Napi::Number::New(env, EPOLLOUT), napi_default),
+                                                        StaticValue("EPOLLRDHUP", Napi::Number::New(env, EPOLLRDHUP), napi_default),
+                                                        StaticValue("EPOLLPRI", Napi::Number::New(env, EPOLLPRI), napi_default),
+                                                        StaticValue("EPOLLERR", Napi::Number::New(env, EPOLLERR), napi_default),
+                                                        StaticValue("EPOLLHUP", Napi::Number::New(env, EPOLLHUP), napi_default),
+                                                        StaticValue("EPOLLET", Napi::Number::New(env, EPOLLET), napi_default),
+                                                        StaticValue("EPOLLONESHOT", Napi::Number::New(env, EPOLLONESHOT), napi_default),
+                                                    });
+
+    exports.Set("Epoll", func);
+
+    return Napi::Persistent(func);
   }
 
-  return 0;
-}
-
-
-static int start_watcher() {
-  static bool watcher_started = false;
-  pthread_t theread_id;
-
-  if (watcher_started)
-    return 0;
-
-  epfd_g = epoll_create1(0);
-  if (epfd_g == -1)
-    return errno;
-
-  int err = uv_sem_init(&sem_g, 1);
-  if (err < 0) {
-    close(epfd_g);
-    return -err;
-  }
-
-  err = uv_async_init(uv_default_loop(), &async_g, Epoll::HandleEvent);
-  if (err < 0) {
-    close(epfd_g);
-    uv_sem_destroy(&sem_g);
-    return -err;
-  }
-
-  // Prevent async_g from keeping event loop alive, for the time being.
-  uv_unref((uv_handle_t *) &async_g);
-
-  err = pthread_create(&theread_id, 0, watcher, 0);
-  if (err != 0) {
-    close(epfd_g);
-    uv_sem_destroy(&sem_g);
-    uv_close((uv_handle_t *) &async_g, 0);
-    return err;
-  }
-
-  watcher_started = true;
-
-  return 0;
-}
-
-
-/*
- * Epoll
- */
-Nan::Persistent<v8::Function> Epoll::constructor;
-std::map<int, Epoll*> Epoll::fd2epoll;
-
-
-Epoll::Epoll(Nan::Callback *callback)
-  : callback_(callback), closed_(false) {
-  async_resource_ = new Nan::AsyncResource("Epoll:DispatchEvent");
-};
-
-
-Epoll::~Epoll() {
-  // v8 decides when and if destructors are called. In particular, if the
-  // process is about to terminate, it's highly likely that destructors will
-  // not be called. This is therefore not the place for calling the likes of
-  // uv_unref, which, in general, must be called to terminate a process
-  // gracefully!
-  Nan::HandleScope scope;
-  if (callback_) delete callback_;
-  if (async_resource_) delete async_resource_;
-};
-
-
-NAN_MODULE_INIT(Epoll::Init) {
-  // Constructor
-  v8::Local<v8::FunctionTemplate> ctor =
-    Nan::New<v8::FunctionTemplate>(Epoll::New);
-  ctor->SetClassName(Nan::New("Epoll").ToLocalChecked());
-  ctor->InstanceTemplate()->SetInternalFieldCount(1);
-
-  // Prototype
-  Nan::SetPrototypeMethod(ctor, "add", Add);
-  Nan::SetPrototypeMethod(ctor, "modify", Modify);
-  Nan::SetPrototypeMethod(ctor, "remove", Remove);
-  Nan::SetPrototypeMethod(ctor, "close", Close);
-
-  v8::Local<v8::ObjectTemplate> itpl = ctor->InstanceTemplate();
-  Nan::SetAccessor(itpl, Nan::New<v8::String>("closed").ToLocalChecked(),
-    GetClosed);
-
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLIN").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLIN), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLOUT").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLOUT), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLRDHUP").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLRDHUP), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLPRI").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLPRI), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLERR").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLERR), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLHUP").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLHUP), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLET").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLET), v8::ReadOnly);
-  Nan::SetTemplate(ctor, Nan::New<v8::String>("EPOLLONESHOT").ToLocalChecked(),
-    Nan::New<v8::Integer>(EPOLLONESHOT), v8::ReadOnly);
-
-  constructor.Reset(Nan::GetFunction(ctor).ToLocalChecked());
-  Nan::Set(target, Nan::New<v8::String>("Epoll").ToLocalChecked(),
-    Nan::GetFunction(ctor).ToLocalChecked());
-
-  // TODO - Is it a good idea to throw an exception here?
-  if (int err = start_watcher())
-    Nan::ThrowError(strerror(err)); // TODO - use err also
-}
-
-
-NAN_METHOD(Epoll::New) {
-  if (info.Length() < 1 || !info[0]->IsFunction())
-    return Nan::ThrowError("First argument to construtor must be a callback");
-
-  Nan::Callback *callback = new Nan::Callback(info[0].As<v8::Function>());
-
-  Epoll *epoll = new Epoll(callback);
-  epoll->Wrap(info.This());
-
-  info.GetReturnValue().Set(info.This());
-}
-
-
-NAN_METHOD(Epoll::Add) {
-  Epoll *epoll = ObjectWrap::Unwrap<Epoll>(info.This());
-
-  if (epoll->closed_)
-    return Nan::ThrowError("add can't be called after calling close");
-
-  // Epoll.EPOLLET is -0x8000000 on ARM and an IsUint32 check fails so
-  // check for IsNumber instead.
-  if (info.Length() < 2 || !info[0]->IsInt32() || !info[1]->IsNumber())
-    return Nan::ThrowError("incorrect arguments passed to add"
-      "(int fd, int events)");
-
-  int err = epoll->Add(
-    Nan::To<int32_t>(info[0]).FromJust(),
-    Nan::To<int32_t>(info[1]).FromJust()
-  );
-  if (err != 0)
-    return Nan::ThrowError(strerror(err)); // TODO - use err also
-
-  info.GetReturnValue().Set(info.This());
-}
-
-
-NAN_METHOD(Epoll::Modify) {
-  Epoll *epoll = ObjectWrap::Unwrap<Epoll>(info.This());
-
-  if (epoll->closed_)
-    return Nan::ThrowError("modify can't be called after calling close");
-
-  // Epoll.EPOLLET is -0x8000000 on ARM and an IsUint32 check fails so
-  // check for IsNumber instead.
-  if (info.Length() < 2 || !info[0]->IsInt32() || !info[1]->IsNumber())
-    return Nan::ThrowError("incorrect arguments passed to modify"
-      "(int fd, int events)");
-
-  int err = epoll->Modify(
-    Nan::To<int32_t>(info[0]).FromJust(),
-    Nan::To<int32_t>(info[1]).FromJust()
-  );
-  if (err != 0)
-    return Nan::ThrowError(strerror(err)); // TODO - use err also
-
-  info.GetReturnValue().Set(info.This());
-}
-
-
-NAN_METHOD(Epoll::Remove) {
-  Epoll *epoll = ObjectWrap::Unwrap<Epoll>(info.This());
-
-  if (epoll->closed_)
-    return Nan::ThrowError("remove can't be called after calling close");
-
-  if (info.Length() < 1 || !info[0]->IsInt32())
-    return Nan::ThrowError("incorrect arguments passed to remove(int fd)");
-
-  int err = epoll->Remove(Nan::To<int32_t>(info[0]).FromJust());
-  if (err != 0)
-    return Nan::ThrowError(strerror(err)); // TODO - use err also
-
-  info.GetReturnValue().Set(info.This());
-}
-
-
-NAN_METHOD(Epoll::Close) {
-  Epoll *epoll = ObjectWrap::Unwrap<Epoll>(info.This());
-
-  if (epoll->closed_)
-    return Nan::ThrowError("close can't be called more than once");
-
-  int err = epoll->Close();
-  if (err != 0)
-    return Nan::ThrowError(strerror(err)); // TODO - use err also
-
-  info.GetReturnValue().SetNull();
-}
-
-
-NAN_GETTER(Epoll::GetClosed) {
-  Epoll *epoll = ObjectWrap::Unwrap<Epoll>(info.This());
-
-  info.GetReturnValue().Set(Nan::New<v8::Boolean>(epoll->closed_));
-}
-
-
-int Epoll::Add(int fd, uint32_t events) {
-  struct epoll_event event;
-  event.events = events;
-  event.data.fd = fd;
-
-  if (epoll_ctl(epfd_g, EPOLL_CTL_ADD, fd, &event) == -1)
-    return errno;
-
-  fd2epoll.insert(std::pair<int, Epoll*>(fd, this));
-  fds_.push_back(fd);
-
-  // Keep event loop alive. uv_unref called in Remove.
-  uv_ref((uv_handle_t *) &async_g);
-
-  // Prevent GC for this instance. Unref called in Remove.
-  Ref();
-
-  return 0;
-}
-
-
-int Epoll::Modify(int fd, uint32_t events) {
-  struct epoll_event event;
-  event.events = events;
-  event.data.fd = fd;
-
-  if (epoll_ctl(epfd_g, EPOLL_CTL_MOD, fd, &event) == -1)
-    return errno;
-
-  return 0;
-}
-
-
-int Epoll::Remove(int fd) {
-  if (epoll_ctl(epfd_g, EPOLL_CTL_DEL, fd, 0) == -1)
-    return errno;
-
-  fd2epoll.erase(fd);
-  fds_.remove(fd);
-
-  if (fd2epoll.empty())
-    uv_unref((uv_handle_t *) &async_g);
-  Unref();
-
-  return 0;
-}
-
-
-int Epoll::Close() {
-  closed_ = true;
-
-  delete callback_;
-  callback_ = 0;
-
-  delete async_resource_;
-  async_resource_ = 0;
-
-  std::list<int>::iterator it = fds_.begin();
-  for (; it != fds_.end(); it = fds_.begin()) {
-    int err = Remove(*it);
+  Napi::Value Epoll::Add(const Napi::CallbackInfo &info)
+  {
+    Napi::Env env = info.Env();
+
+    if (this->closed_)
+    {
+      Napi::Error::New(env, "add can't be called after calling close").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    // Epoll.EPOLLET is -0x8000000 on ARM and an IsUint32 check fails so
+    // check for IsNumber instead.
+    if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber())
+    {
+      Napi::Error::New(env, "incorrect arguments passed to add"
+                            "(int fd, int events)")
+          .ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    int fd = info[0].As<Napi::Number>().Int32Value();
+    int events = info[1].As<Napi::Number>().Int32Value();
+
+    // Take a reference or create the watcher
+    if (!watcher_)
+    {
+      auto data = env.GetInstanceData<EpollInstanceData>();
+      if (!data)
+      {
+        Napi::Error::New(env, "Library is not initialised correctly").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+
+      watcher_ = data->watcher.lock();
+      if (!watcher_)
+      {
+        watcher_ = std::make_shared<EpollWatcher>(env);
+        data->watcher = watcher_;
+      }
+    }
+
+    int err = watcher_->Add(fd, events, this);
     if (err != 0)
-      return err; // TODO - Returning here may leave things messed up.
+    {
+      Napi::Error::New(env, strerror(err)).ThrowAsJavaScriptException();
+      return env.Null(); // TODO - use err also
+    }
+
+    fds_.push_back(fd);
+
+    return info.This();
   }
 
-  return 0;
-}
+  Napi::Value Epoll::Modify(const Napi::CallbackInfo &info)
+  {
+    Napi::Env env = info.Env();
 
+    if (this->closed_)
+    {
+      Napi::Error::New(env, "modify can't be called after calling close").ThrowAsJavaScriptException();
+      return env.Null();
+    }
 
-void Epoll::HandleEvent(uv_async_t* handle) {
-  // This method is executed in the event loop thread.
-  // By the time flow of control arrives here the original Epoll instance that
-  // registered interest in the event may no longer have this interest. If
-  // this is the case, the event will be silently ignored.
+    // Epoll.EPOLLET is -0x8000000 on ARM and an IsUint32 check fails so
+    // check for IsNumber instead.
+    if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber())
+    {
+      Napi::Error::New(env, "incorrect arguments passed to modify"
+                            "(int fd, int events)")
+          .ThrowAsJavaScriptException();
+      return env.Null();
+    }
 
-  std::map<int, Epoll*>::iterator it = fd2epoll.find(event_g.data.fd);
-  if (it != fd2epoll.end()) {
-    it->second->DispatchEvent(errno_g, &event_g);
+    if (!watcher_)
+    {
+      Napi::Error::New(env, "modify can't be called when not watching a fd").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    // TODO - validate this is watching fd
+
+    int err = watcher_->Modify(
+        info[0].As<Napi::Number>().Int32Value(),
+        info[1].As<Napi::Number>().Int32Value());
+    if (err != 0)
+    {
+      Napi::Error::New(env, strerror(err)).ThrowAsJavaScriptException();
+      return env.Null(); // TODO - use err also
+    }
+
+    return info.This();
   }
 
-  uv_sem_post(&sem_g);
-}
+  Napi::Value Epoll::Remove(const Napi::CallbackInfo &info)
+  {
+    Napi::Env env = info.Env();
 
+    if (this->closed_)
+    {
+      Napi::Error::New(env, "remove can't be called after calling close").ThrowAsJavaScriptException();
+      return env.Null();
+    }
 
-void Epoll::DispatchEvent(int err, struct epoll_event *event) {
-  Nan::HandleScope scope;
+    if (info.Length() < 1 || !info[0].IsNumber())
+    {
+      Napi::Error::New(env, "incorrect arguments passed to remove(int fd)").ThrowAsJavaScriptException();
+      return env.Null();
+    }
 
-  if (err) {
-    v8::Local<v8::Value> args[1] = {
-      v8::Exception::Error(
-        Nan::New<v8::String>(strerror(err)).ToLocalChecked()
-      )
-    };
-    callback_->Call(1, args, async_resource_);
-  } else {
-    v8::Local<v8::Value> args[3] = {
-      Nan::Null(),
-      Nan::New<v8::Integer>(event->data.fd),
-      Nan::New<v8::Integer>(event->events)
-    };
-    callback_->Call(3, args, async_resource_);
+    int fd = info[0].As<Napi::Number>().Int32Value();
+
+    int err = watcher_->Remove(fd);
+
+    fds_.remove(fd);
+    if (fds_.empty())
+    {
+      watcher_ = nullptr;
+    }
+
+    if (err != 0)
+    {
+      Napi::Error::New(env, strerror(err)).ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    return info.This();
   }
+
+  Napi::Value Epoll::Close(const Napi::CallbackInfo &info)
+  {
+    Napi::Env env = info.Env();
+
+    if (this->closed_)
+    {
+      Napi::Error::New(env, "close can't be called more than once").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    closed_ = true;
+
+    int error = 0;
+
+    for (int fd : fds_)
+    {
+      int err = watcher_->Remove(fd);
+      if (err != 0)
+        error = err; // TODO - This will only return one of many errors
+    }
+
+    watcher_ = nullptr;
+
+    if (error != 0)
+    {
+      Napi::Error::New(env, strerror(error)).ThrowAsJavaScriptException();
+      return env.Null(); // TODO - use err also
+    }
+
+    return env.Null();
+  }
+
+  Napi::Value Epoll::GetClosed(const Napi::CallbackInfo &info)
+  {
+    return Napi::Boolean::New(info.Env(), this->closed_);
+  }
+
+  void Epoll::DispatchEvent(const Napi::Env &env, int err, struct epoll_event *event)
+  {
+    Napi::HandleScope scope(env);
+
+    try
+    {
+      if (err)
+      {
+        callback_.MakeCallback(Value(), std::initializer_list<napi_value>{Napi::Error::New(env, strerror(err)).Value()}, async_context_);
+      }
+      else
+      {
+        callback_.MakeCallback(Value(), std::initializer_list<napi_value>{env.Null(), Napi::Number::New(env, event->data.fd), Napi::Number::New(env, event->events)},
+                               async_context_);
+      }
+    }
+    catch (...)
+    {
+      // TODO - what to do with this error?
+    }
+  }
+
+  Napi::Object Init(Napi::Env env, Napi::Object exports)
+  {
+    auto instanceData = new EpollInstanceData;
+
+    instanceData->epollContructor = Epoll::Init(env, exports);
+
+    // Store the constructor as the add-on instance data. This will allow this
+    // add-on to support multiple instances of itself running on multiple worker
+    // threads, as well as multiple instances of itself running in different
+    // contexts on the same thread.
+    //
+    // By default, the value set on the environment here will be destroyed when
+    // the add-on is unloaded using the `delete` operator, but it is also
+    // possible to supply a custom deleter.
+    env.SetInstanceData<EpollInstanceData>(instanceData);
+
+    return exports;
+  }
+
+  NODE_API_MODULE(epoll, Init)
 }
-
-
-NODE_MODULE(epoll, Epoll::Init)
 
 #endif
-

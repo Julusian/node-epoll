@@ -1,36 +1,42 @@
-#ifndef EPOLL_H
-#define EPOLL_H
+#pragma once
 
-class Epoll : public Nan::ObjectWrap {
+#define NAPI_VERSION 8
+
+#include <napi.h>
+
+#include "watcher.h"
+
+namespace epoll
+{
+  struct EpollInstanceData
+  {
+    std::weak_ptr<EpollWatcher> watcher;
+    Napi::FunctionReference epollContructor;
+  };
+
+  class Epoll : public Napi::ObjectWrap<Epoll>
+  {
   public:
-    static NAN_MODULE_INIT(Init);
-    static void HandleEvent(uv_async_t* handle);
+    static Napi::FunctionReference Init(const Napi::Env &env, Napi::Object exports);
 
-  private:
-    Epoll(Nan::Callback *callback);
+    Epoll(const Napi::CallbackInfo &info);
     ~Epoll();
 
-    static NAN_METHOD(New);
-    static NAN_METHOD(Add);
-    static NAN_METHOD(Modify);
-    static NAN_METHOD(Remove);
-    static NAN_METHOD(Close);
-    static NAN_GETTER(GetClosed);
+    void DispatchEvent(const Napi::Env &env, int err, struct epoll_event *event);
 
-    int Add(int fd, uint32_t events);
-    int Modify(int fd, uint32_t events);
-    int Remove(int fd);
-    int Close();
-    void DispatchEvent(int err, struct epoll_event *event);
+  private:
+    Napi::Value Add(const Napi::CallbackInfo &info);
+    Napi::Value Modify(const Napi::CallbackInfo &info);
+    Napi::Value Remove(const Napi::CallbackInfo &info);
+    Napi::Value Close(const Napi::CallbackInfo &info);
+    Napi::Value GetClosed(const Napi::CallbackInfo &info);
 
-    Nan::Callback *callback_;
-    Nan::AsyncResource *async_resource_;
+    Napi::FunctionReference callback_;
+    Napi::AsyncContext async_context_;
+
     std::list<int> fds_;
     bool closed_;
 
-    static Nan::Persistent<v8::Function> constructor;
-    static std::map<int, Epoll*> fd2epoll;
-};
-
-#endif
-
+    std::shared_ptr<EpollWatcher> watcher_;
+  };
+}

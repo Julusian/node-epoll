@@ -284,7 +284,7 @@ namespace epoll
     return exports;
   }
 
-  NODE_API_MODULE(epoll, Init)
+  NODE_API_MODULE(julusian_epoll, Init)
 }
 
 #endif

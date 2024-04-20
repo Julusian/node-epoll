@@ -1,6 +1,6 @@
 {
   "targets": [{
-    "target_name": "epoll",
+    "target_name": "julusian-epoll",
       "cflags!": [ "-fno-exceptions" ],
       "cflags_cc!": [ "-fno-exceptions" ],
       "xcode_settings": { "GCC_ENABLE_CPP_EXCEPTIONS": "YES",

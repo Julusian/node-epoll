@@ -1,0 +1,163 @@
+name: NodeCI
+
+on:
+  push:
+    # tags:
+    #   - v*
+
+env:
+  NAPI_VERSION: 8
+  BINDING_NAME: julusian-epoll
+
+jobs:
+  build-and-test:
+    name: Build ${{ matrix.docker-arch || matrix.arch }} on ${{ matrix.docker-image || matrix.container || matrix.os }} ${{ matrix.libc }}
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # windows
+          - os: windows-2019
+            arch: x64
+            is-native: true
+          - os: windows-2019
+            arch: ia32
+            is-native: false
+          # macos
+          - os: macos-11
+            arch: arm64
+            is-native: false
+          - os: macos-10.15
+            arch: x64
+            is-native: true
+          # linux
+          - os: ubuntu-latest
+            arch: x64
+            is-native: true
+            container: centos:7
+          # linux-arm
+          - os: ubuntu-latest
+            arch: arm64
+            is-native: false
+            docker-arch: linux/arm64
+            docker-image: centos:7
+          - os: ubuntu-latest
+            arch: arm
+            is-native: false
+            docker-arch: linux/arm/v7
+            docker-image: node:14-buster
+          # linux-musl
+          - os: ubuntu-latest
+            arch: x64
+            is-native: true
+            container: node:16-alpine3.12
+            libc: musl
+
+    steps:
+      - name: Dependencies (Centos)
+        if: contains(matrix.container, 'centos')
+        run: |
+          curl -sL https://rpm.nodesource.com/setup_16.x | bash -
+          yum install -y centos-release-scl
+          yum install -y devtoolset-11-gcc-c++ make git python3 nodejs
+          corepack enable
+          echo "/opt/rh/devtoolset-11/root/usr/bin" >> $GITHUB_PATH
+      - name: Dependencies (Linux musl)
+        if: contains(matrix.container, 'alpine')
+        run: apk add build-base git python3 font-noto bash --update-cache
+
+      - uses: actions/checkout@v3
+      - name: Checkout submodules
+        if: "!contains(matrix.container, 'centos')"
+        shell: bash
+        run: |
+          auth_header="$(git config --local --get http.https://github.com/.extraheader)"
+          git submodule sync --recursive
+          git -c "http.extraheader=$auth_header" -c protocol.version=2 submodule update --init --force --recursive --depth=1
+
+      - name: Use Node.js 16.x
+        if: ${{ !matrix.docker-arch && !matrix.container }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16.x
+
+      - name: rebuild
+        if: ${{ !matrix.docker-arch }}
+        shell: bash
+        run: |
+          yarn
+
+          if [ -n "${{ matrix.is-native }}" ]; then
+            yarn test
+          fi
+
+          yarn rebuild --arch=${{ matrix.arch }}
+          yarn pkg-prebuilds-copy --baseDir build/Release --source $BINDING_NAME.node --name=$BINDING_NAME --strip --napi_version=$NAPI_VERSION --arch=${{ matrix.arch }} --libc=${{ matrix.libc }}
+        env:
+          CI: true
+          npm_config_build_from_source: true
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+        if: matrix.docker-arch
+      - name: rebuild (in docker)
+        uses: addnab/docker-run-action@v3
+        if: matrix.docker-arch
+        with:
+          image: ${{ matrix.docker-image }}
+          # shell: bash
+          options: --platform=${{ matrix.docker-arch }} -v ${{ github.workspace }}:/work -e CI=1 -e npm_config_build_from_source=1 -e NAPI_VERSION -e BINDING_NAME
+          run: |
+            if command -v apt-get &> /dev/null
+            then
+              apt-get update
+              apt-get install -y python3
+            elif command -v yum &> /dev/null
+            then
+              curl -sL https://rpm.nodesource.com/setup_16.x | bash -
+              yum install -y centos-release-scl
+              yum install -y devtoolset-10-gcc-c++ make git python3 nodejs
+              export PATH=/opt/rh/devtoolset-10/root/usr/bin:$PATH
+            fi
+
+            cd /work
+
+            corepack enable
+
+            # try and avoid timeout errors
+            yarn config set network-timeout 100000 -g
+
+            yarn
+            yarn test
+            yarn pkg-prebuilds-copy --baseDir build/Release --source $BINDING_NAME.node --name=$BINDING_NAME --strip --napi_version=$NAPI_VERSION --arch=${{ matrix.arch }} --libc=${{ matrix.libc }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ runner.os }}-${{ matrix.arch }}-${{ matrix.libc }}-prebuilds
+          path: prebuilds
+          retention-days: 1
+
+  bundle:
+    name: Bundle prebuilds
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          path: tmp
+
+      - name: Display structure of downloaded files
+        run: |
+          mkdir prebuilds
+          cp -R tmp/*/* prebuilds/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: all-prebuilds
+          path: prebuilds
+          retention-days: 7

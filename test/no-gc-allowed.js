@@ -1,4 +1,4 @@
-"use strict";
+'use strict';
 
 /*
  * This test resulted in a segmentation fault in epoll v0.0.6. See issue #5.
@@ -10,13 +10,13 @@
  * for best results:
  * echo | node no-gc-allowed
  */
-const Epoll = require("../").Epoll;
+const Epoll = require('../').Epoll;
 
-const stdin = 0; // fd for stdin
+const stdin = 0; // fd for stdin 
 
 const time = process.hrtime();
 
-const poller = new Epoll((_) => {
+const poller = new Epoll(_ => {
   const timeSoFar = process.hrtime(time);
   if (timeSoFar[0] > 5) {
     // BB faults in ~2.5s, Pi faults in ~?s, so wait about 5s.
@@ -29,3 +29,4 @@ const poller = new Epoll((_) => {
 });
 
 poller.add(stdin, Epoll.EPOLLIN);
+

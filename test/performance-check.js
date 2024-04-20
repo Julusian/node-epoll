@@ -1,4 +1,4 @@
-"use strict";
+'use strict';
 
 /*
  * Determine approximately how many EPOLLIN events can be handled per second.
@@ -13,8 +13,8 @@
  * The newline should be piped in for reasonable results:
  * echo | node performance-check
  */
-const Epoll = require("../").Epoll;
-const util = require("./util");
+const Epoll = require('../').Epoll;
+const util = require('./util');
 
 const stdin = 0; // fd for stdin
 
@@ -25,18 +25,15 @@ const epoll = new Epoll((err, fd, events) => {
   count += 1;
 });
 
-setTimeout((_) => {
-  try {
-    time = process.hrtime(time);
-    const rate = Math.floor(count / (time[0] + time[1] / 1e9));
-    console.log("  " + rate + " events per second");
+setTimeout(_ => {
+  time = process.hrtime(time);
+  const rate = Math.floor(count / (time[0] + time[1] / 1E9));
+  console.log('  ' + rate + ' events per second');
 
-    epoll.remove(stdin).close();
-    util.read(stdin); // read stdin (the newline)
-  } catch (e) {
-    console.error(e);
-  }
+  epoll.remove(stdin).close();
+  util.read(stdin); // read stdin (the newline)
 }, 1000);
 
 epoll.add(stdin, Epoll.EPOLLIN);
 time = process.hrtime();
+

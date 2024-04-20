@@ -26,7 +26,7 @@
   },
   "dependencies": {
     "node-addon-api": "^7.1.0",
-    "pkg-prebuilds": "^0.2.1"
+    "pkg-prebuilds": "^1.0.0"
   },
   "keywords": [
     "epoll",
